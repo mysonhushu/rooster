@@ -1,0 +1,325 @@
+/*
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+package rooster.api;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.text.DateFormat;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.Collections;
+import java.util.Date;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import rooster.config.SystemLoad;
+import rooster.excel.read.ReadExcel;
+import rooster.excel.read.WriteExcel;
+import rooster.internal.bean.Result;
+import rooster.internal.bean.t_daily_attendance;
+import rooster.internal.dao.RoosterDao;
+
+public class RoosterRunner {
+     RoosterDao roosterDao;
+    static{
+        SystemLoad.init();
+    }
+    public void process(boolean isHistory,String filePath,String beginDate,String endDate,Result result){
+         if(roosterDao == null)
+        {
+            roosterDao = new RoosterDao();
+        }
+        //如果不是历史数据，就需要根据输入的文件路径导入数据
+        if(!isHistory)
+        {
+             //第一步：导入数据
+             ArrayList<String[]> lines = ReadExcel.getBeanFromExcel(filePath);
+             if(null == lines)
+             {
+                 RoosterModel.logs.setValue("读取："+filePath+"文件错误！");
+             }else{
+                 //添加数据
+                 roosterDao.batchAddDailyAttendance(lines);
+                 //删除重复数据
+                 roosterDao.deleteRepeateData("t_daily_attendance");
+             }
+        } 
+        //第二步：查询并计算数据
+         ArrayList<t_daily_attendance> tdaList =  roosterDao.getDailyAttendanceByDate(beginDate,endDate);
+         for(t_daily_attendance tda:tdaList)
+         {
+            tda.isLate = judgeSignIn(tda.accord_date,8,35,0);
+            tda.lateRemark = caculateSingIn(tda.accord_date,8,35,0);
+         }
+         ArrayList<t_daily_attendance> lackList = new ArrayList<t_daily_attendance>();
+         //获取员工姓名集合
+         ArrayList<String> staffNames = roosterDao.getStaffNamesByDate(beginDate, endDate);
+         
+         //获取特殊权限员工
+         ArrayList<String> specialStaffNames = read2Array("config/specialStaff");
+         
+         staffNames.removeAll(specialStaffNames);
+         
+        //获取工作天数 
+         ArrayList<String> workDays   = roosterDao.getWorkDateByDate(beginDate, endDate);
+         //遍历员工
+         for(String staffName :staffNames)
+         {
+            //一个员工的签到记录
+             ArrayList<t_daily_attendance> aStaffSign = new ArrayList<t_daily_attendance>();
+              //一个员工的签到日期集合
+             ArrayList<String> aStaffSignDate = new ArrayList<String>();
+             
+             String cardNo = "";
+             //遍历所有的签到记录
+             for(t_daily_attendance staff:tdaList)
+             {
+                 //找到同一个员工的签到记录
+                 if(staffName.equals(staff.staff_name))
+                 {
+                     //添加该员工的签到记录
+                     aStaffSign.add(staff);
+                     //添加该员工的签到日期
+                     aStaffSignDate.add(staff.accord_date.substring(0, 10));
+                     //记录员工编号
+                     cardNo = staff.card_no;
+                 }
+             }
+             //克隆所有的工作日
+             ArrayList<String> workDaysTemp   = new ArrayList(workDays);
+             //所有的工作日减去该员工的签到日
+             workDaysTemp.removeAll(aStaffSignDate);
+             //如果有没有签到的情况
+             if(!workDaysTemp.isEmpty())
+             {
+                 //记录没有签到的记录
+                 for(String lackDate:workDaysTemp)
+                 {
+                     t_daily_attendance lack = new  t_daily_attendance();
+                     lack.accord_date = lackDate;
+                     lack.staff_name = staffName;
+                     lack.lateRemark = "在 "+lackDate+" 没有打卡";
+                     lack.card_no = cardNo;
+                     lack.isLate = true;
+                     lackList.add(lack);
+                   //  System.out.println(staffName+"  "+lack.lateRemark );
+                 }
+             }
+         }
+         ArrayList<t_daily_attendance> total = new ArrayList<t_daily_attendance>();
+         total.addAll(tdaList);
+         total.addAll(lackList);
+         Collections.sort(total,new SortByCardNo());
+        //输出数据：
+         WriteExcel.exportExcel(total, result);
+    }
+   
+
+    public static ArrayList<String> read2Array(String fileName)
+     {
+           ArrayList<String> lines = new ArrayList<String>();
+       BufferedReader reader = null;
+       FileReader filer = null;
+       try
+       {
+         File file = new File(fileName);
+         filer = new FileReader(file);
+         reader = new BufferedReader(filer);
+         String lineCons = null;
+         while ((lineCons = reader.readLine()) != null)
+         {
+             lines.add(lineCons);
+             lineCons = null;
+         }
+       }
+       catch (Exception e)
+       {
+         e.printStackTrace();
+       }
+       finally
+       {
+         close(reader, filer);
+       }
+       return lines;
+     }
+    
+    public static void close(BufferedReader reader, FileReader filer)
+    {
+      if (reader != null)
+      {
+        try
+        {
+          reader.close();
+        }
+        catch (Exception e)
+        {
+          e.printStackTrace();
+        }
+        reader = null;
+      }
+      if (filer != null)
+      {
+        try
+        {
+          filer.close();
+        }
+        catch (Exception e)
+        {
+          e.printStackTrace();
+        }
+        filer = null;
+      }
+    }
+    /**
+     * 获取导入的数据
+     */
+    public static void generateData(){
+      RoosterDao dao = new RoosterDao();
+      ArrayList<t_daily_attendance>   a = dao.getDailyAttendance();
+      for(t_daily_attendance m :a)
+      {
+          System.out.println(m.accord_date);
+      }
+    }
+    /**
+     * 判断是否迟到
+     * @param date
+     * @param h
+     * @param m
+     * @param s
+     * @return 
+     */
+    public static boolean judgeSignIn(String date,int h,int m,int s){
+        boolean beLate = true; 
+        //标准时间格式化
+         DateFormat df = new SimpleDateFormat ("yyyy-MM-dd hh:mm:ss"); 
+        try {
+            Date d1 = df.parse(date);
+            Calendar cal=Calendar.getInstance();
+            cal.setTime(d1);
+            int hour = cal.get(Calendar.HOUR_OF_DAY);
+            int minute = cal.get(Calendar.MINUTE);
+            int seconds = cal.get(Calendar.SECOND);
+            if(hour<h){
+                beLate = false;
+            }else if(hour == h){
+                if(minute<m){
+                    beLate = false;
+                }else if(minute == m){
+                    if(seconds <= s){
+                        beLate = false;
+                    }else{
+                        beLate = true;
+                    }
+                }else{
+                    beLate = true;
+                }
+            }else{
+                 beLate = false; 
+            }
+        } catch (ParseException ex) {
+            Logger.getLogger(RoosterRunner.class.getName()).log(Level.SEVERE, null, ex);
+        }
+        return beLate;
+    }
+    
+      /**
+       * 判断是否早退
+       * @param date
+       * @param h
+       * @param m
+       * @param s
+       * @return 
+       */
+        public static boolean judgeSignOut(String date,int h,int m,int s){
+        boolean beOverTime = true; 
+        //标准时间格式化
+         DateFormat df = new SimpleDateFormat ("yyyy-MM-dd hh:mm:ss"); 
+        try {
+            Date d1 = df.parse(date);
+            Calendar cal=Calendar.getInstance();
+            cal.setTime(d1);
+            int hour = cal.get(Calendar.HOUR_OF_DAY);
+            int minute = cal.get(Calendar.MINUTE);
+            int seconds = cal.get(Calendar.SECOND);
+            if(hour<h){
+                beOverTime = true;
+            }else if(hour == h){
+                if(minute<m){
+                    beOverTime = true;
+                }else if(minute == m){
+                    if(seconds <= s){
+                        beOverTime = true;
+                    }else{
+                        beOverTime = false;
+                    }
+                }else{
+                    beOverTime = false;
+                }
+            }else{
+                 beOverTime = true; 
+            }
+        } catch (ParseException ex) {
+            Logger.getLogger(RoosterRunner.class.getName()).log(Level.SEVERE, null, ex);
+        }
+        return beOverTime;
+    }
+        
+    /**
+     * 计算迟到的时间
+     * @param date
+     * @param h
+     * @param m
+     * @param s
+     * @return 
+     */
+    public static String caculateSingIn(String date,int h,int m,int s){
+        try {
+            SimpleDateFormat sdf=new SimpleDateFormat("yyyy-MM-dd hh:mm:ss");
+            Calendar cal1=Calendar.getInstance();
+            cal1.setTime(sdf.parse(date));
+            Calendar cal2=Calendar.getInstance();
+            cal2.setTime(sdf.parse(date));
+            cal2.set(cal1.get(Calendar.YEAR), cal1.get(Calendar.MONTH), cal1.get(Calendar.DAY_OF_MONTH), h, m, s);
+            Date taskTime1 = cal1.getTime();
+            Date taskTime2 = cal2.getTime();
+            String prex = taskTime1.getTime()-taskTime2.getTime()>0 ? "迟到:":"早到:";
+            long l = Math.abs(taskTime1.getTime()-taskTime2.getTime());
+            long day=l/(24*60*60*1000);
+            long hour=(l/(60*60*1000)-day*24);
+            long min=((l/(60*1000))-day*24*60-hour*60);
+            long seconds=(l/1000-day*24*60*60-hour*60*60-min*60);
+            return prex+hour+" 小时  "+min+"  分钟  "+seconds+" 秒";
+        } catch (ParseException ex) {
+            Logger.getLogger(RoosterRunner.class.getName()).log(Level.SEVERE, null, ex);
+        }
+          return null;
+    }
+    
+    public static String formateDate(String time)
+    {
+        String result = null;
+        DateFormat df = new SimpleDateFormat ("yyyy-MM-dd HH:mm:ss"); 
+        Date date;
+         try {
+             date = df.parse(time);
+             result = df.format(date);
+         } catch (ParseException ex) {
+             Logger.getLogger(RoosterRunner.class.getName()).log(Level.SEVERE, null, ex);
+         }  
+        return result;
+    }
+    public static void main(String[] args){
+        //2014-09-02 8:53:31
+        //2014-09-01 18:18:22
+       String time = "2014-08-26 08:15:33";
+//       String a =  formateDate(time);
+       String a = time.substring(0, 10);
+       System.out.println("---"+a);
+    }
+}
